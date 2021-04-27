@@ -352,6 +352,8 @@ async function webpackExtensions(taskName, isWatch, webpackConfigLocations) {
  * @param {string} esbuildScripts
  */
 async function esbuildExtensions(taskName, isWatch, outputRoot, esbuildScripts) {
+	fancyLog(`Starting ${ansiColors.green(taskName)} to ${outputRoot} with ${JSON.stringify(esbuildScripts)}.`);
+
 	function reporter(/** @type {string} */ stdError, /** @type {string} */script) {
 		const matches = (stdError || '').match(/\> (.+): error: (.+)?/g);
 		fancyLog(`Finished ${ansiColors.green(taskName)} ${script} with ${matches ? matches.length : 0} errors.`);

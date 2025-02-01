@@ -3,55 +3,128 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { nbformat } from '@jupyterlab/coreutils';
-import { NotebookCellData, NotebookCellKind, NotebookCellOutput } from 'vscode';
-import { CellOutputMetadata } from './common';
+import type * as nbformat from '@jupyterlab/nbformat';
+import type { NotebookCell, NotebookCellData, NotebookCellOutput, NotebookData, NotebookDocument } from 'vscode';
+import { CellOutputMetadata, type CellMetadata } from './common';
+import { textMimeTypes, NotebookCellKindMarkup, CellOutputMimeTypes, defaultNotebookFormat } from './constants';
 
 const textDecoder = new TextDecoder();
 
-enum CellOutputMimeTypes {
-	error = 'application/vnd.code.notebook.error',
-	stderr = 'application/vnd.code.notebook.stderr',
-	stdout = 'application/vnd.code.notebook.stdout'
-}
-
-const textMimeTypes = ['text/plain', 'text/markdown', CellOutputMimeTypes.stderr, CellOutputMimeTypes.stdout];
-
 export function createJupyterCellFromNotebookCell(
-	vscCell: NotebookCellData
+	vscCell: NotebookCellData,
+	preferredLanguage: string | undefined,
 ): nbformat.IRawCell | nbformat.IMarkdownCell | nbformat.ICodeCell {
 	let cell: nbformat.IRawCell | nbformat.IMarkdownCell | nbformat.ICodeCell;
-	if (vscCell.kind === NotebookCellKind.Markup) {
+	if (vscCell.kind === NotebookCellKindMarkup) {
 		cell = createMarkdownCellFromNotebookCell(vscCell);
 	} else if (vscCell.languageId === 'raw') {
 		cell = createRawCellFromNotebookCell(vscCell);
 	} else {
-		cell = createCodeCellFromNotebookCell(vscCell);
+		cell = createCodeCellFromNotebookCell(vscCell, preferredLanguage);
 	}
 	return cell;
 }
 
-function createCodeCellFromNotebookCell(cell: NotebookCellData): nbformat.ICodeCell {
-	const cellMetadata = cell.metadata?.custom as CellMetadata | undefined;
-	const codeCell: any = {
+
+/**
+ * Sort the JSON to minimize unnecessary SCM changes.
+ * Jupyter notbeooks/labs sorts the JSON keys in alphabetical order.
+ * https://github.com/microsoft/vscode-python/issues/13155
+ */
+export function sortObjectPropertiesRecursively(obj: any): any {
+	if (Array.isArray(obj)) {
+		return obj.map(sortObjectPropertiesRecursively);
+	}
+	if (obj !== undefined && obj !== null && typeof obj === 'object' && Object.keys(obj).length > 0) {
+		return (
+			Object.keys(obj)
+				.sort()
+				.reduce<Record<string, any>>((sortedObj, prop) => {
+					sortedObj[prop] = sortObjectPropertiesRecursively(obj[prop]);
+					return sortedObj;
+				}, {}) as any
+		);
+	}
+	return obj;
+}
+
+export function getCellMetadata(options: { cell: NotebookCell | NotebookCellData } | { metadata?: { [key: string]: any } }): CellMetadata {
+	if ('cell' in options) {
+		const cell = options.cell;
+		const metadata = {
+			execution_count: null,
+			// it contains the cell id, and the cell metadata, along with other nb cell metadata
+			...(cell.metadata ?? {})
+		} satisfies CellMetadata;
+		if (cell.kind === NotebookCellKindMarkup) {
+			delete (metadata as any).execution_count;
+		}
+		return metadata;
+	} else {
+		const cell = options;
+		const metadata = {
+			// it contains the cell id, and the cell metadata, along with other nb cell metadata
+			...(cell.metadata ?? {})
+		};
+
+		return metadata as CellMetadata;
+	}
+}
+
+export function getVSCodeCellLanguageId(metadata: CellMetadata): string | undefined {
+	return metadata.metadata?.vscode?.languageId;
+}
+export function setVSCodeCellLanguageId(metadata: CellMetadata, languageId: string) {
+	metadata.metadata = metadata.metadata || {};
+	metadata.metadata.vscode = { languageId };
+}
+export function removeVSCodeCellLanguageId(metadata: CellMetadata) {
+	if (metadata.metadata?.vscode) {
+		delete metadata.metadata.vscode;
+	}
+}
+
+function createCodeCellFromNotebookCell(cell: NotebookCellData, preferredLanguage: string | undefined): nbformat.ICodeCell {
+	const cellMetadata: CellMetadata = JSON.parse(JSON.stringify(getCellMetadata({ cell })));
+	cellMetadata.metadata = cellMetadata.metadata || {}; // This cannot be empty.
+	if (cell.languageId !== preferredLanguage) {
+		setVSCodeCellLanguageId(cellMetadata, cell.languageId);
+	} else {
+		// cell current language is the same as the preferred cell language in the document, flush the vscode custom language id metadata
+		removeVSCodeCellLanguageId(cellMetadata);
+	}
+
+	const codeCell: nbformat.ICodeCell = {
 		cell_type: 'code',
-		execution_count: cell.executionSummary?.executionOrder ?? null,
-		source: splitMultilineString(cell.value),
+		// Metadata should always contain the execution_count.
+		// When ever execution summary data changes we will update the metadata to contain the execution count.
+		// Failing to do so means we have a problem.
+		// Also do not read the value of executionSummary here, as its possible user reverted changes to metadata
+		// & in that case execution summary could contain the data, but metadata will not.
+		// In such cases we do not want to re-set the metadata with the value from execution summary (remember, user reverted that).
+		execution_count: cellMetadata.execution_count ?? null,
+		source: splitMultilineString(cell.value.replace(/\r\n/g, '\n')),
 		outputs: (cell.outputs || []).map(translateCellDisplayOutput),
-		metadata: cellMetadata?.metadata || {} // This cannot be empty.
+		metadata: cellMetadata.metadata
 	};
+	if (cellMetadata?.id) {
+		codeCell.id = cellMetadata.id;
+	}
 	return codeCell;
 }
 
 function createRawCellFromNotebookCell(cell: NotebookCellData): nbformat.IRawCell {
-	const cellMetadata = cell.metadata?.custom as CellMetadata | undefined;
+	const cellMetadata = getCellMetadata({ cell });
 	const rawCell: any = {
 		cell_type: 'raw',
-		source: splitMultilineString(cell.value),
+		source: splitMultilineString(cell.value.replace(/\r\n/g, '\n')),
 		metadata: cellMetadata?.metadata || {} // This cannot be empty.
 	};
 	if (cellMetadata?.attachments) {
 		rawCell.attachments = cellMetadata.attachments;
+	}
+	if (cellMetadata?.id) {
+		rawCell.id = cellMetadata.id;
 	}
 	return rawCell;
 }
@@ -94,7 +167,7 @@ function translateCellDisplayOutput(output: NotebookCellOutput): JupyterOutput {
 		case 'display_data': {
 			result = {
 				output_type: 'display_data',
-				data: output.items.reduceRight((prev: any, curr) => {
+				data: output.items.reduce((prev: any, curr) => {
 					prev[curr.mime] = convertOutputMimeToJupyterOutput(curr.mime, curr.data as Uint8Array);
 					return prev;
 				}, {}),
@@ -105,7 +178,7 @@ function translateCellDisplayOutput(output: NotebookCellOutput): JupyterOutput {
 		case 'execute_result': {
 			result = {
 				output_type: 'execute_result',
-				data: output.items.reduceRight((prev: any, curr) => {
+				data: output.items.reduce((prev: any, curr) => {
 					prev[curr.mime] = convertOutputMimeToJupyterOutput(curr.mime, curr.data as Uint8Array);
 					return prev;
 				}, {}),
@@ -118,7 +191,7 @@ function translateCellDisplayOutput(output: NotebookCellOutput): JupyterOutput {
 		case 'update_display_data': {
 			result = {
 				output_type: 'update_display_data',
-				data: output.items.reduceRight((prev: any, curr) => {
+				data: output.items.reduce((prev: any, curr) => {
 					prev[curr.mime] = convertOutputMimeToJupyterOutput(curr.mime, curr.data as Uint8Array);
 					return prev;
 				}, {}),
@@ -163,7 +236,7 @@ function translateCellDisplayOutput(output: NotebookCellOutput): JupyterOutput {
 				unknownOutput.metadata = customMetadata.metadata;
 			}
 			if (output.items.length > 0) {
-				unknownOutput.data = output.items.reduceRight((prev: any, curr) => {
+				unknownOutput.data = output.items.reduce((prev: any, curr) => {
 					prev[curr.mime] = convertOutputMimeToJupyterOutput(curr.mime, curr.data as Uint8Array);
 					return prev;
 				}, {});
@@ -224,17 +297,38 @@ type JupyterOutput =
 	| nbformat.IError;
 
 function convertStreamOutput(output: NotebookCellOutput): JupyterOutput {
-	const outputs = output.items
+	const outputs: string[] = [];
+	output.items
 		.filter((opit) => opit.mime === CellOutputMimeTypes.stderr || opit.mime === CellOutputMimeTypes.stdout)
-		.map((opit) => convertOutputMimeToJupyterOutput(opit.mime, opit.data as Uint8Array) as string)
-		.reduceRight<string[]>((prev, curr) => prev.concat(curr), []);
+		.map((opit) => textDecoder.decode(opit.data))
+		.forEach(value => {
+			// Ensure each line is a separate entry in an array (ending with \n).
+			const lines = value.split('\n');
+			// If the last item in `outputs` is not empty and the first item in `lines` is not empty, then concate them.
+			// As they are part of the same line.
+			if (outputs.length && lines.length && lines[0].length > 0) {
+				outputs[outputs.length - 1] = `${outputs[outputs.length - 1]}${lines.shift()!}`;
+			}
+			for (const line of lines) {
+				outputs.push(line);
+			}
+		});
+
+	for (let index = 0; index < (outputs.length - 1); index++) {
+		outputs[index] = `${outputs[index]}\n`;
+	}
+
+	// Skip last one if empty (it's the only one that could be length 0)
+	if (outputs.length && outputs[outputs.length - 1].length === 0) {
+		outputs.pop();
+	}
 
 	const streamType = getOutputStreamType(output) || 'stdout';
 
 	return {
 		output_type: 'stream',
 		name: streamType,
-		text: splitMultilineString(outputs.join(''))
+		text: outputs
 	};
 }
 
@@ -255,58 +349,43 @@ function convertOutputMimeToJupyterOutput(mime: string, value: Uint8Array) {
 			if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
 				return Buffer.from(value).toString('base64');
 			} else {
-				// https://developer.mozilla.org/en-US/docs/Glossary/Base64#solution_1_%E2%80%93_escaping_the_string_before_encoding_it
-				const stringValue = textDecoder.decode(value);
-				return btoa(encodeURIComponent(stringValue).replace(/%([0-9A-F]{2})/g, function (_match, p1) {
-					return String.fromCharCode(Number.parseInt('0x' + p1));
-				}));
+				return btoa(value.reduce((s: string, b: number) => s + String.fromCharCode(b), ''));
 			}
 		} else if (mime.toLowerCase().includes('json')) {
 			const stringValue = textDecoder.decode(value);
 			return stringValue.length > 0 ? JSON.parse(stringValue) : stringValue;
+		} else if (mime === 'image/svg+xml') {
+			return splitMultilineString(textDecoder.decode(value));
 		} else {
-			const stringValue = textDecoder.decode(value);
-			return stringValue;
+			return textDecoder.decode(value);
 		}
 	} catch (ex) {
 		return '';
 	}
 }
 
-function createMarkdownCellFromNotebookCell(cell: NotebookCellData): nbformat.IMarkdownCell {
-	const cellMetadata = cell.metadata?.custom as CellMetadata | undefined;
+export function createMarkdownCellFromNotebookCell(cell: NotebookCellData): nbformat.IMarkdownCell {
+	const cellMetadata = getCellMetadata({ cell });
 	const markdownCell: any = {
 		cell_type: 'markdown',
-		source: splitMultilineString(cell.value),
+		source: splitMultilineString(cell.value.replace(/\r\n/g, '\n')),
 		metadata: cellMetadata?.metadata || {} // This cannot be empty.
 	};
 	if (cellMetadata?.attachments) {
 		markdownCell.attachments = cellMetadata.attachments;
 	}
+	if (cellMetadata?.id) {
+		markdownCell.id = cellMetadata.id;
+	}
 	return markdownCell;
-}
-
-/**
- * Metadata we store in VS Code cells.
- * This contains the original metadata from the Jupyuter cells.
- */
-interface CellMetadata {
-	/**
-	 * Stores attachments for cells.
-	 */
-	attachments?: nbformat.IAttachments;
-	/**
-	 * Stores cell metadata.
-	 */
-	metadata?: Partial<nbformat.ICellMetadata>;
 }
 
 export function pruneCell(cell: nbformat.ICell): nbformat.ICell {
 	// Source is usually a single string on input. Convert back to an array
-	const result = {
+	const result: nbformat.ICell = {
 		...cell,
 		source: splitMultilineString(cell.source)
-	} as nbformat.ICell;
+	};
 
 	// Remove outputs and execution_count from non code cells
 	if (result.cell_type !== 'code') {
@@ -368,4 +447,37 @@ function fixupOutput(output: nbformat.IOutput): nbformat.IOutput {
 		}
 	}
 	return result;
+}
+
+
+export function serializeNotebookToString(data: NotebookData): string {
+	const notebookContent = getNotebookMetadata(data);
+	// use the preferred language from document metadata or the first cell language as the notebook preferred cell language
+	const preferredCellLanguage = notebookContent.metadata?.language_info?.name ?? data.cells.find(cell => cell.kind === 2)?.languageId;
+
+	notebookContent.cells = data.cells
+		.map(cell => createJupyterCellFromNotebookCell(cell, preferredCellLanguage))
+		.map(pruneCell);
+
+	const indentAmount = data.metadata && 'indentAmount' in data.metadata && typeof data.metadata.indentAmount === 'string' ?
+		data.metadata.indentAmount :
+		' ';
+
+	return serializeNotebookToJSON(notebookContent, indentAmount);
+}
+function serializeNotebookToJSON(notebookContent: Partial<nbformat.INotebookContent>, indentAmount: string): string {
+	// ipynb always ends with a trailing new line (we add this so that SCMs do not show unnecessary changes, resulting from a missing trailing new line).
+	const sorted = sortObjectPropertiesRecursively(notebookContent);
+
+	return JSON.stringify(sorted, undefined, indentAmount) + '\n';
+}
+
+export function getNotebookMetadata(document: NotebookDocument | NotebookData) {
+	const existingContent: Partial<nbformat.INotebookContent> = document.metadata || {};
+	const notebookContent: Partial<nbformat.INotebookContent> = {};
+	notebookContent.cells = existingContent.cells || [];
+	notebookContent.nbformat = existingContent.nbformat || defaultNotebookFormat.major;
+	notebookContent.nbformat_minor = existingContent.nbformat_minor ?? defaultNotebookFormat.minor;
+	notebookContent.metadata = existingContent.metadata || {};
+	return notebookContent;
 }

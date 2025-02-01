@@ -3,19 +3,18 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
-
-import * as path from 'path';
-import * as es from 'event-stream';
-import * as Vinyl from 'vinyl';
-import * as vfs from 'vinyl-fs';
+import path from 'path';
+import es from 'event-stream';
+import Vinyl from 'vinyl';
+import vfs from 'vinyl-fs';
 import * as util from '../lib/util';
-// @ts-ignore
-import * as deps from '../lib/dependencies';
+import { getProductionDependencies } from '../lib/dependencies';
+import { ClientAssertionCredential } from '@azure/identity';
 const azure = require('gulp-azure-storage');
 
 const root = path.dirname(path.dirname(__dirname));
-const commit = util.getVersion(root);
+const commit = process.env['BUILD_SOURCEVERSION'];
+const credential = new ClientAssertionCredential(process.env['AZURE_TENANT_ID']!, process.env['AZURE_CLIENT_ID']!, () => Promise.resolve(process.env['AZURE_ID_TOKEN']!));
 
 // optionally allow to pass in explicit base/maps to upload
 const [, , base, maps] = process.argv;
@@ -28,18 +27,19 @@ function src(base: string, maps = `${base}/**/*.map`) {
 		}));
 }
 
-function main() {
-	const sources = [];
+function main(): Promise<void> {
+	const sources: any[] = [];
 
 	// vscode client maps (default)
 	if (!base) {
 		const vs = src('out-vscode-min'); // client source-maps only
 		sources.push(vs);
 
-		const productionDependencies: { name: string, path: string, version: string }[] = deps.getProductionDependencies(root);
-		const productionDependenciesSrc = productionDependencies.map(d => path.relative(root, d.path)).map(d => `./${d}/**/*.map`);
+		const productionDependencies = getProductionDependencies(root);
+		const productionDependenciesSrc = productionDependencies.map((d: string) => path.relative(root, d)).map((d: string) => `./${d}/**/*.map`);
 		const nodeModules = vfs.src(productionDependenciesSrc, { base: '.' })
-			.pipe(util.cleanNodeModules(path.join(root, 'build', '.moduleignore')));
+			.pipe(util.cleanNodeModules(path.join(root, 'build', '.moduleignore')))
+			.pipe(util.cleanNodeModules(path.join(root, 'build', `.moduleignore.${process.platform}`)));
 		sources.push(nodeModules);
 
 		const extensionsOut = vfs.src(['.build/extensions/**/*.js.map', '!**/node_modules/**'], { base: '.build' });
@@ -51,17 +51,25 @@ function main() {
 		sources.push(src(base, maps));
 	}
 
-	return es.merge(...sources)
-		.pipe(es.through(function (data: Vinyl) {
-			console.log('Uploading Sourcemap', data.relative); // debug
-			this.emit('data', data);
-		}))
-		.pipe(azure.upload({
-			account: process.env.AZURE_STORAGE_ACCOUNT,
-			key: process.env.AZURE_STORAGE_ACCESS_KEY,
-			container: 'sourcemaps',
-			prefix: commit + '/'
-		}));
+	return new Promise((c, e) => {
+		es.merge(...sources)
+			.pipe(es.through(function (data: Vinyl) {
+				console.log('Uploading Sourcemap', data.relative); // debug
+				this.emit('data', data);
+			}))
+			.pipe(azure.upload({
+				account: process.env.AZURE_STORAGE_ACCOUNT,
+				credential,
+				container: 'sourcemaps',
+				prefix: commit + '/'
+			}))
+			.on('end', () => c())
+			.on('error', (err: any) => e(err));
+	});
 }
 
-main();
+main().catch(err => {
+	console.error(err);
+	process.exit(1);
+});
+

@@ -3,13 +3,15 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { nbformat } from '@jupyterlab/coreutils';
+import * as sinon from 'sinon';
+import type * as nbformat from '@jupyterlab/nbformat';
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { jupyterNotebookModelToNotebookData } from '../deserializers';
+import { jupyterCellOutputToCellOutput, jupyterNotebookModelToNotebookData } from '../deserializers';
+import { createMarkdownCellFromNotebookCell, getCellMetadata } from '../serializers';
 
 function deepStripProperties(obj: any, props: string[]) {
-	for (let prop in obj) {
+	for (const prop in obj) {
 		if (obj[prop]) {
 			delete obj[prop];
 		} else if (typeof obj[prop] === 'object') {
@@ -17,8 +19,17 @@ function deepStripProperties(obj: any, props: string[]) {
 		}
 	}
 }
+suite(`ipynb serializer`, () => {
+	let disposables: vscode.Disposable[] = [];
+	setup(() => {
+		disposables = [];
+	});
+	teardown(async () => {
+		disposables.forEach(d => d.dispose());
+		disposables = [];
+		sinon.restore();
+	});
 
-suite('ipynb serializer', () => {
 	const base64EncodedImage =
 		'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mOUlZL6DwAB/wFSU1jVmgAAAABJRU5ErkJggg==';
 	test('Deserialize', async () => {
@@ -28,6 +39,12 @@ suite('ipynb serializer', () => {
 				execution_count: 10,
 				outputs: [],
 				source: 'print(1)',
+				metadata: {}
+			},
+			{
+				cell_type: 'code',
+				outputs: [],
+				source: 'print(2)',
 				metadata: {}
 			},
 			{
@@ -41,16 +58,81 @@ suite('ipynb serializer', () => {
 
 		const expectedCodeCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, 'print(1)', 'python');
 		expectedCodeCell.outputs = [];
-		expectedCodeCell.metadata = { custom: { metadata: {} } };
+		expectedCodeCell.metadata = { execution_count: 10, metadata: {} };
 		expectedCodeCell.executionSummary = { executionOrder: 10 };
+
+		const expectedCodeCell2 = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, 'print(2)', 'python');
+		expectedCodeCell2.outputs = [];
+		expectedCodeCell2.metadata = { execution_count: null, metadata: {} };
+		expectedCodeCell2.executionSummary = {};
 
 		const expectedMarkdownCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, '# HEAD', 'markdown');
 		expectedMarkdownCell.outputs = [];
 		expectedMarkdownCell.metadata = {
-			custom: { metadata: {} }
+			metadata: {}
 		};
 
-		assert.deepStrictEqual(notebook.cells, [expectedCodeCell, expectedMarkdownCell]);
+		assert.deepStrictEqual(notebook.cells, [expectedCodeCell, expectedCodeCell2, expectedMarkdownCell]);
+	});
+
+
+	test('Serialize', async () => {
+		const markdownCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, '# header1', 'markdown');
+		markdownCell.metadata = {
+			attachments: {
+				'image.png': {
+					'image/png': 'abc'
+				}
+			},
+			id: '123',
+			metadata: {
+				foo: 'bar'
+			}
+		};
+
+		const cellMetadata = getCellMetadata({ cell: markdownCell });
+		assert.deepStrictEqual(cellMetadata, {
+			id: '123',
+			metadata: {
+				foo: 'bar',
+			},
+			attachments: {
+				'image.png': {
+					'image/png': 'abc'
+				}
+			}
+		});
+
+		const markdownCell2 = new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, '# header1', 'markdown');
+		markdownCell2.metadata = {
+			id: '123',
+			metadata: {
+				foo: 'bar'
+			},
+			attachments: {
+				'image.png': {
+					'image/png': 'abc'
+				}
+			}
+		};
+
+		const nbMarkdownCell = createMarkdownCellFromNotebookCell(markdownCell);
+		const nbMarkdownCell2 = createMarkdownCellFromNotebookCell(markdownCell2);
+		assert.deepStrictEqual(nbMarkdownCell, nbMarkdownCell2);
+
+		assert.deepStrictEqual(nbMarkdownCell, {
+			cell_type: 'markdown',
+			source: ['# header1'],
+			metadata: {
+				foo: 'bar',
+			},
+			attachments: {
+				'image.png': {
+					'image/png': 'abc'
+				}
+			},
+			id: '123'
+		});
 	});
 
 	suite('Outputs', () => {
@@ -102,6 +184,123 @@ suite('ipynb serializer', () => {
 						outputType: 'stream'
 					}),
 					new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.stdout('NoError')], {
+						outputType: 'stream'
+					})
+				]
+			);
+		});
+		test('Stream output and line endings', () => {
+			validateCellOutputTranslation(
+				[
+					{
+						output_type: 'stream',
+						name: 'stdout',
+						text: [
+							'Line1\n',
+							'\n',
+							'Line3\n',
+							'Line4'
+						]
+					}
+				],
+				[
+					new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.stdout('Line1\n\nLine3\nLine4')], {
+						outputType: 'stream'
+					})
+				]
+			);
+			validateCellOutputTranslation(
+				[
+					{
+						output_type: 'stream',
+						name: 'stdout',
+						text: [
+							'Hello\n',
+							'Hello\n',
+							'Hello\n',
+							'Hello\n',
+							'Hello\n',
+							'Hello\n'
+						]
+					}
+				],
+				[
+					new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.stdout('Hello\nHello\nHello\nHello\nHello\nHello\n')], {
+						outputType: 'stream'
+					})
+				]
+			);
+		});
+		test('Multi-line Stream output', () => {
+			validateCellOutputTranslation(
+				[
+					{
+						name: 'stdout',
+						output_type: 'stream',
+						text: [
+							'Epoch 1/5\n',
+							'...\n',
+							'Epoch 2/5\n',
+							'...\n',
+							'Epoch 3/5\n',
+							'...\n',
+							'Epoch 4/5\n',
+							'...\n',
+							'Epoch 5/5\n',
+							'...\n'
+						]
+					}
+				],
+				[
+					new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.stdout(['Epoch 1/5\n',
+						'...\n',
+						'Epoch 2/5\n',
+						'...\n',
+						'Epoch 3/5\n',
+						'...\n',
+						'Epoch 4/5\n',
+						'...\n',
+						'Epoch 5/5\n',
+						'...\n'].join(''))], {
+						outputType: 'stream'
+					})
+				]
+			);
+		});
+
+		test('Multi-line Stream output (last empty line should not be saved in ipynb)', () => {
+			validateCellOutputTranslation(
+				[
+					{
+						name: 'stderr',
+						output_type: 'stream',
+						text: [
+							'Epoch 1/5\n',
+							'...\n',
+							'Epoch 2/5\n',
+							'...\n',
+							'Epoch 3/5\n',
+							'...\n',
+							'Epoch 4/5\n',
+							'...\n',
+							'Epoch 5/5\n',
+							'...\n'
+						]
+					}
+				],
+				[
+					new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.stderr(['Epoch 1/5\n',
+						'...\n',
+						'Epoch 2/5\n',
+						'...\n',
+						'Epoch 3/5\n',
+						'...\n',
+						'Epoch 4/5\n',
+						'...\n',
+						'Epoch 5/5\n',
+						'...\n',
+						// This last empty line should not be saved in ipynb.
+						'\n'].join(''))], {
 						outputType: 'stream'
 					})
 				]
@@ -388,6 +587,133 @@ suite('ipynb serializer', () => {
 						propertiesToExcludeFromComparison
 					);
 				});
+			});
+		});
+	});
+
+	suite('Output Order', () => {
+		test('Verify order of outputs', async () => {
+			const dataAndExpectedOrder: { output: nbformat.IDisplayData; expectedMimeTypesOrder: string[] }[] = [
+				{
+					output: {
+						data: {
+							'application/vnd.vegalite.v4+json': 'some json',
+							'text/html': '<a>Hello</a>'
+						},
+						metadata: {},
+						output_type: 'display_data'
+					},
+					expectedMimeTypesOrder: ['application/vnd.vegalite.v4+json', 'text/html']
+				},
+				{
+					output: {
+						data: {
+							'application/vnd.vegalite.v4+json': 'some json',
+							'application/javascript': 'some js',
+							'text/plain': 'some text',
+							'text/html': '<a>Hello</a>'
+						},
+						metadata: {},
+						output_type: 'display_data'
+					},
+					expectedMimeTypesOrder: [
+						'application/vnd.vegalite.v4+json',
+						'text/html',
+						'application/javascript',
+						'text/plain'
+					]
+				},
+				{
+					output: {
+						data: {
+							'application/vnd.vegalite.v4+json': '', // Empty, should give preference to other mimetypes.
+							'application/javascript': 'some js',
+							'text/plain': 'some text',
+							'text/html': '<a>Hello</a>'
+						},
+						metadata: {},
+						output_type: 'display_data'
+					},
+					expectedMimeTypesOrder: [
+						'text/html',
+						'application/javascript',
+						'text/plain',
+						'application/vnd.vegalite.v4+json'
+					]
+				},
+				{
+					output: {
+						data: {
+							'text/plain': 'some text',
+							'text/html': '<a>Hello</a>'
+						},
+						metadata: {},
+						output_type: 'display_data'
+					},
+					expectedMimeTypesOrder: ['text/html', 'text/plain']
+				},
+				{
+					output: {
+						data: {
+							'application/javascript': 'some js',
+							'text/plain': 'some text'
+						},
+						metadata: {},
+						output_type: 'display_data'
+					},
+					expectedMimeTypesOrder: ['application/javascript', 'text/plain']
+				},
+				{
+					output: {
+						data: {
+							'image/svg+xml': 'some svg',
+							'text/plain': 'some text'
+						},
+						metadata: {},
+						output_type: 'display_data'
+					},
+					expectedMimeTypesOrder: ['image/svg+xml', 'text/plain']
+				},
+				{
+					output: {
+						data: {
+							'text/latex': 'some latex',
+							'text/plain': 'some text'
+						},
+						metadata: {},
+						output_type: 'display_data'
+					},
+					expectedMimeTypesOrder: ['text/latex', 'text/plain']
+				},
+				{
+					output: {
+						data: {
+							'application/vnd.jupyter.widget-view+json': 'some widget',
+							'text/plain': 'some text'
+						},
+						metadata: {},
+						output_type: 'display_data'
+					},
+					expectedMimeTypesOrder: ['application/vnd.jupyter.widget-view+json', 'text/plain']
+				},
+				{
+					output: {
+						data: {
+							'text/plain': 'some text',
+							'image/svg+xml': 'some svg',
+							'image/png': 'some png'
+						},
+						metadata: {},
+						output_type: 'display_data'
+					},
+					expectedMimeTypesOrder: ['image/png', 'image/svg+xml', 'text/plain']
+				}
+			];
+
+			dataAndExpectedOrder.forEach(({ output, expectedMimeTypesOrder }) => {
+				const sortedOutputs = jupyterCellOutputToCellOutput(output);
+				const mimeTypes = sortedOutputs.items.map((item) => item.mime).join(',');
+				assert.equal(mimeTypes, expectedMimeTypesOrder.join(','));
 			});
 		});
 	});

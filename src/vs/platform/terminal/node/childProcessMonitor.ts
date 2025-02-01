@@ -3,13 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { parse } from 'path';
-import { debounce, throttle } from 'vs/base/common/decorators';
-import { Emitter } from 'vs/base/common/event';
-import { Disposable } from 'vs/base/common/lifecycle';
-import { ProcessItem } from 'vs/base/common/processes';
-import { listProcesses } from 'vs/base/node/ps';
-import { ILogService } from 'vs/platform/log/common/log';
+import { parse } from '../../../base/common/path.js';
+import { debounce, throttle } from '../../../base/common/decorators.js';
+import { Emitter } from '../../../base/common/event.js';
+import { Disposable } from '../../../base/common/lifecycle.js';
+import { ProcessItem } from '../../../base/common/processes.js';
+import { listProcesses } from '../../../base/node/ps.js';
+import { ILogService } from '../../log/common/log.js';
 
 const enum Constants {
 	/**
@@ -22,21 +22,13 @@ const enum Constants {
 	ActiveDebounceDuration = 1000,
 }
 
-const ignoreProcessNames = [
-	// Popular prompt programs, these should not count as child processes
-	'starship',
-	'oh-my-posh',
-	// Git bash may runs a subprocess of itself (bin\bash.exe -> usr\bin\bash.exe)
-	'bash',
-];
+export const ignoreProcessNames: string[] = [];
 
 /**
  * Monitors a process for child processes, checking at differing times depending on input and output
  * calls into the monitor.
  */
 export class ChildProcessMonitor extends Disposable {
-	private _isDisposed: boolean = false;
-
 	private _hasChildProcesses: boolean = false;
 	private set hasChildProcesses(value: boolean) {
 		if (this._hasChildProcesses !== value) {
@@ -63,11 +55,6 @@ export class ChildProcessMonitor extends Disposable {
 		super();
 	}
 
-	override dispose() {
-		this._isDisposed = true;
-		super.dispose();
-	}
-
 	/**
 	 * Input was triggered on the process.
 	 */
@@ -84,7 +71,7 @@ export class ChildProcessMonitor extends Disposable {
 
 	@debounce(Constants.ActiveDebounceDuration)
 	private async _refreshActive(): Promise<void> {
-		if (this._isDisposed) {
+		if (this._store.isDisposed) {
 			return;
 		}
 		try {

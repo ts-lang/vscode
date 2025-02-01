@@ -3,14 +3,27 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Schemas } from 'vs/base/common/network';
-import { URI } from 'vs/base/common/uri';
-import { localize } from 'vs/nls';
-import { EditorInputCapabilities, IEditorInput, IUntypedEditorInput } from 'vs/workbench/common/editor';
-import { EditorInput } from 'vs/workbench/common/editor/editorInput';
-import { IExtension, IExtensionsWorkbenchService } from 'vs/workbench/contrib/extensions/common/extensions';
-import { areSameExtensions } from 'vs/platform/extensionManagement/common/extensionManagementUtil';
-import { join } from 'vs/base/common/path';
+import { Schemas } from '../../../../base/common/network.js';
+import { URI } from '../../../../base/common/uri.js';
+import { localize } from '../../../../nls.js';
+import { EditorInputCapabilities, IUntypedEditorInput } from '../../../common/editor.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
+import { ExtensionEditorTab, IExtension } from './extensions.js';
+import { areSameExtensions } from '../../../../platform/extensionManagement/common/extensionManagementUtil.js';
+import { join } from '../../../../base/common/path.js';
+import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
+import { Codicon } from '../../../../base/common/codicons.js';
+import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
+
+const ExtensionEditorIcon = registerIcon('extensions-editor-label-icon', Codicon.extensions, localize('extensionsEditorLabelIcon', 'Icon of the extensions editor label.'));
+
+export interface IExtensionEditorOptions extends IEditorOptions {
+	showPreReleaseVersion?: boolean;
+	tab?: ExtensionEditorTab;
+	feature?: string;
+	sideByside?: boolean;
+}
 
 export class ExtensionsInput extends EditorInput {
 
@@ -31,16 +44,8 @@ export class ExtensionsInput extends EditorInput {
 		});
 	}
 
-	constructor(
-		private _extension: IExtension,
-		@IExtensionsWorkbenchService extensionsWorkbenchService: IExtensionsWorkbenchService
-	) {
+	constructor(private _extension: IExtension) {
 		super();
-		this._register(extensionsWorkbenchService.onChange(extension => {
-			if (extension && areSameExtensions(this._extension.identifier, extension.identifier)) {
-				this._extension = extension;
-			}
-		}));
 	}
 
 	get extension(): IExtension { return this._extension; }
@@ -49,7 +54,11 @@ export class ExtensionsInput extends EditorInput {
 		return localize('extensionsInputName', "Extension: {0}", this._extension.displayName);
 	}
 
-	override matches(other: IEditorInput | IUntypedEditorInput): boolean {
+	override getIcon(): ThemeIcon | undefined {
+		return ExtensionEditorIcon;
+	}
+
+	override matches(other: EditorInput | IUntypedEditorInput): boolean {
 		if (super.matches(other)) {
 			return true;
 		}

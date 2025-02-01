@@ -4,13 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
-import * as path from 'path';
-import { URI } from 'vs/base/common/uri';
-import { ExtensionStoragePaths as CommonExtensionStoragePaths } from 'vs/workbench/api/common/extHostStoragePaths';
-import { Disposable } from 'vs/base/common/lifecycle';
-import { Schemas } from 'vs/base/common/network';
-import { IntervalTimer, timeout } from 'vs/base/common/async';
-import { ILogService } from 'vs/platform/log/common/log';
+import * as path from '../../../base/common/path.js';
+import { URI } from '../../../base/common/uri.js';
+import { ExtensionStoragePaths as CommonExtensionStoragePaths } from '../common/extHostStoragePaths.js';
+import { Disposable } from '../../../base/common/lifecycle.js';
+import { Schemas } from '../../../base/common/network.js';
+import { IntervalTimer, timeout } from '../../../base/common/async.js';
+import { ILogService } from '../../../platform/log/common/log.js';
+import { Promises } from '../../../base/node/pfs.js';
 
 export class ExtensionStoragePaths extends CommonExtensionStoragePaths {
 
@@ -62,9 +63,7 @@ export class ExtensionStoragePaths extends CommonExtensionStoragePaths {
 
 	override onWillDeactivateAll(): void {
 		// the lock will be released soon
-		if (this._workspaceStorageLock) {
-			this._workspaceStorageLock.setWillRelease(6000);
-		}
+		this._workspaceStorageLock?.setWillRelease(6000);
 	}
 }
 
@@ -124,7 +123,7 @@ class Lock extends Disposable {
 				pid: process.pid,
 				willReleaseAt: Date.now() + timeUntilReleaseMs
 			};
-			await fs.promises.writeFile(this.filename, JSON.stringify(contents), { flag: 'w' });
+			await Promises.writeFile(this.filename, JSON.stringify(contents), { flag: 'w' });
 		} catch (err) {
 			this.logService.error(err);
 		}
@@ -142,7 +141,7 @@ async function tryAcquireLock(logService: ILogService, filename: string, isSecon
 			pid: process.pid,
 			willReleaseAt: 0
 		};
-		await fs.promises.writeFile(filename, JSON.stringify(contents), { flag: 'wx' });
+		await Promises.writeFile(filename, JSON.stringify(contents), { flag: 'wx' });
 	} catch (err) {
 		logService.error(err);
 	}
